@@ -11,6 +11,13 @@ import {
   TextRun,
   WidthType,
 } from "docx";
+import mammoth from "mammoth/mammoth.browser";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/legacy/build/pdf.worker.mjs",
+  import.meta.url,
+).toString();
 
 const INITIAL_FORM = {
   sourceType: "Purple=Sourced",
@@ -21,10 +28,166 @@ const INITIAL_FORM = {
   overview: "",
 };
 
+const EMAIL_OR_PHONE = /@|\d{3}[\s\-.)]*\d{3}[\s\-.]*\d{4}/;
+
+const cleanValue = (value) =>
+  (value || "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s\-:|,;.]+|[\s\-:|,;.]+$/g, "")
+    .trim();
+
+const titleCase = (value) =>
+  value
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0].toUpperCase() + part.slice(1))
+    .join(" ");
+
+const inferSourceType = (text) => {
+  const lower = text.toLowerCase();
+  if (/\b(applicant|applied|application|inbound)\b/.test(lower)) {
+    return "Green=Applicant";
+  }
+  return "Purple=Sourced";
+};
+
+const findByLabel = (text, labels) => {
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    for (const label of labels) {
+      const pattern = new RegExp(
+        `^${label}\\s*[:\\-]\\s*(.+)$`,
+        "i",
+      );
+      const match = line.match(pattern);
+      if (match?.[1]) {
+        return cleanValue(match[1]);
+      }
+    }
+  }
+  return "";
+};
+
+const findBestName = (fileName, resumeText, notesText) => {
+  const fileNameCandidate = cleanValue(
+    fileName
+      .replace(/\.[^/.]+$/, "")
+      .replace(/resume|cv/gi, " ")
+      .replace(/[_-]+/g, " "),
+  );
+  if (fileNameCandidate) {
+    return titleCase(fileNameCandidate);
+  }
+
+  const pool = `${resumeText}\n${notesText}`
+    .split(/\r?\n/)
+    .map((line) => cleanValue(line))
+    .filter((line) => line && !EMAIL_OR_PHONE.test(line))
+    .slice(0, 12);
+
+  for (const line of pool) {
+    if (/^[A-Za-z][A-Za-z\s'.-]{3,40}$/.test(line)) {
+      return titleCase(line);
+    }
+  }
+
+  return "";
+};
+
+const extractFromText = (rawNotes, resumeText, fileName) => {
+  const notes = rawNotes || "";
+  const resume = resumeText || "";
+  const combined = `${notes}\n${resume}`;
+
+  const yearsFromLabel = findByLabel(combined, [
+    "years of rn experience",
+    "rn tenure",
+    "years experience",
+    "experience",
+  ]);
+  const yearsFromPattern = combined.match(
+    /\b(\d{1,2}\+?\s*(?:years?|yrs?)(?:\s+of)?\s*(?:rn|nursing)?(?:\s+experience)?)\b/i,
+  )?.[1];
+
+  const unitInterest =
+    findByLabel(combined, [
+      "unit interest",
+      "position",
+      "shift preference",
+      "specialty",
+      "speciality",
+      "department",
+    ]) ||
+    combined.match(
+      /\b(ICU|PICU|NICU|ER|ED|OR|Telemetry|Med[\s-]?Surg|Step[\s-]?Down|L&D|Labor and Delivery)\b/i,
+    )?.[1] ||
+    "";
+
+  const currentEmp =
+    findByLabel(combined, [
+      "current employer",
+      "employer",
+      "current role",
+      "currently at",
+      "current facility",
+    ]) ||
+    "";
+
+  const hotButtons =
+    findByLabel(combined, [
+      "hot buttons",
+      "dealbreakers",
+      "deal breakers",
+      "non-negotiables",
+      "must haves",
+    ]) ||
+    "";
+
+  const overview =
+    findByLabel(combined, [
+      "sourcing overview",
+      "overview",
+      "availability",
+      "summary",
+      "notes",
+    ]) ||
+    cleanValue(notes);
+
+  return {
+    candidateName: findBestName(fileName, resume, notes),
+    sourceType: inferSourceType(combined),
+    unitInterest: cleanValue(unitInterest),
+    yearsExp: cleanValue(yearsFromLabel || yearsFromPattern || ""),
+    currentEmp: cleanValue(currentEmp),
+    hotButtons: cleanValue(hotButtons),
+    overview: cleanValue(overview),
+  };
+};
+
+const mergeFormData = (form, extracted) => ({
+  sourceType: form.sourceType || extracted.sourceType,
+  unitInterest: form.unitInterest || extracted.unitInterest,
+  yearsExp: form.yearsExp || extracted.yearsExp,
+  currentEmp: form.currentEmp || extracted.currentEmp,
+  hotButtons: form.hotButtons || extracted.hotButtons,
+  overview: form.overview || extracted.overview,
+});
+
+const normalizeBlock = (value) => {
+  const cleaned = cleanValue(value);
+  return cleaned || "N/A";
+};
+
 function App() {
-  const [fileStatus, setFileStatus] = useState("(Extracts name & tenure automatically)");
+  const [fileStatus, setFileStatus] = useState("(Will extract text from resume if possible)");
   const [candidateName, setCandidateName] = useState("");
+  const [rawNotes, setRawNotes] = useState("");
+  const [resumeText, setResumeText] = useState("");
+  const [uploadedFileName, setUploadedFileName] = useState("");
   const [form, setForm] = useState(INITIAL_FORM);
+  const [isExtracting, setIsExtracting] = useState(false);
 
   const todayFileStamp = useMemo(() => {
     const today = new Date();
@@ -35,19 +198,80 @@ function App() {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleResumeUpload = (event) => {
+  const extractPdfText = async (file) => {
+    const bytes = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+    let text = "";
+
+    for (let page = 1; page <= pdf.numPages; page += 1) {
+      const pageData = await pdf.getPage(page);
+      const content = await pageData.getTextContent();
+      text += `${content.items.map((item) => item.str).join(" ")}\n`;
+    }
+
+    return text;
+  };
+
+  const extractResumeText = async (file) => {
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith(".txt")) {
+      return file.text();
+    }
+    if (lower.endsWith(".docx")) {
+      const arrayBuffer = await file.arrayBuffer();
+      const result = await mammoth.extractRawText({ arrayBuffer });
+      return result.value || "";
+    }
+    if (lower.endsWith(".pdf")) {
+      return extractPdfText(file);
+    }
+    return "";
+  };
+
+  const applyExtraction = (preferManualValues = true) => {
+    const extracted = extractFromText(rawNotes, resumeText, uploadedFileName);
+    const mergedForm = preferManualValues
+      ? mergeFormData(form, extracted)
+      : {
+          sourceType: extracted.sourceType,
+          unitInterest: extracted.unitInterest,
+          yearsExp: extracted.yearsExp,
+          currentEmp: extracted.currentEmp,
+          hotButtons: extracted.hotButtons,
+          overview: extracted.overview,
+        };
+
+    setForm(mergedForm);
+    if (!candidateName && extracted.candidateName) {
+      setCandidateName(extracted.candidateName);
+    }
+
+    return { extracted, mergedForm };
+  };
+
+  const handleResumeUpload = async (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    setFileStatus(`Loaded: ${file.name}`);
-    const cleanName = file.name
-      .replace(/\.[^/.]+$/, "")
-      .replace(/Resume|CV|-|_/gi, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
+    const cleanName = findBestName(file.name, "", "");
     if (cleanName) {
       setCandidateName(cleanName);
+    }
+
+    setIsExtracting(true);
+    setUploadedFileName(file.name);
+    setFileStatus(`Loaded: ${file.name} (extracting text...)`);
+
+    try {
+      const extractedResumeText = await extractResumeText(file);
+      setResumeText(extractedResumeText);
+      setFileStatus(`Loaded: ${file.name} (text extracted)`);
+      setTimeout(() => applyExtraction(true), 0);
+    } catch (error) {
+      setResumeText("");
+      setFileStatus(`Loaded: ${file.name} (text extraction not available for this file)`);
+    } finally {
+      setIsExtracting(false);
     }
   };
 
@@ -66,7 +290,12 @@ function App() {
           width: { size: 70, type: WidthType.PERCENTAGE },
           children: [
             new Paragraph({
-              children: [new TextRun({ text: value || "N/A", size: 24 })],
+              children: [
+                new TextRun({
+                  text: normalizeBlock(value),
+                  size: 24,
+                }),
+              ],
             }),
           ],
         }),
@@ -74,7 +303,8 @@ function App() {
     });
 
   const generateDoc = async () => {
-    const name = candidateName || "Candidate";
+    const { extracted, mergedForm } = applyExtraction(true);
+    const name = cleanValue(candidateName || extracted.candidateName) || "Candidate";
 
     const doc = new Document({
       sections: [
@@ -96,12 +326,12 @@ function App() {
               width: { size: 100, type: WidthType.PERCENTAGE },
               rows: [
                 createRow("Name", name),
-                createRow("Source Type", form.sourceType),
-                createRow("Unit Interest", form.unitInterest),
-                createRow("RN Tenure", form.yearsExp),
-                createRow("Employer/Location", form.currentEmp),
-                createRow("Hot Buttons", form.hotButtons),
-                createRow("Overview/Avail", form.overview),
+                createRow("Source Type", mergedForm.sourceType),
+                createRow("Unit Interest", mergedForm.unitInterest),
+                createRow("RN Tenure", mergedForm.yearsExp),
+                createRow("Employer/Location", mergedForm.currentEmp),
+                createRow("Hot Buttons", mergedForm.hotButtons),
+                createRow("Overview/Avail", mergedForm.overview),
               ],
             }),
           ],
@@ -123,7 +353,7 @@ function App() {
 
         <div className="upload-section">
           <label htmlFor="resumeUpload" className="file-label">
-            <strong>📁 Step 1: Upload Resume</strong>
+            <strong>Step 1: Upload Resume</strong>
           </label>
           <input
             id="resumeUpload"
@@ -136,7 +366,22 @@ function App() {
 
         <div className="form-group">
           <label>Step 2: Paste Raw Interview Notes Here</label>
-          <textarea placeholder="Paste your sourcing/interview notes here..." />
+          <textarea
+            placeholder="Paste your sourcing/interview notes here..."
+            value={rawNotes}
+            onChange={(e) => setRawNotes(e.target.value)}
+          />
+        </div>
+
+        <div className="button-row">
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => applyExtraction(true)}
+            disabled={isExtracting}
+          >
+            Auto-Fill From Resume + Notes
+          </button>
         </div>
 
         <hr />
@@ -201,7 +446,7 @@ function App() {
           </div>
         </div>
 
-        <button type="button" onClick={generateDoc}>
+        <button type="button" onClick={generateDoc} disabled={isExtracting}>
           Step 3: Generate TSC Submittal
         </button>
       </div>

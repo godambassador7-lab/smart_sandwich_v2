@@ -68,6 +68,10 @@ h1 {
   margin-bottom: 0;
 }
 
+.button-row {
+  margin-bottom: 14px;
+}
+
 .grid-main {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -121,6 +125,23 @@ button {
 
 button:hover {
   background: #003366;
+}
+
+button.secondary {
+  background: #e7f0ff;
+  border: 1px solid #c8dafd;
+  color: #003366;
+  font-size: 0.95rem;
+  padding: 12px;
+}
+
+button.secondary:hover {
+  background: #d6e7ff;
+}
+
+button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
 }
 
 @media (max-width: 768px) {
