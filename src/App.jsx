@@ -96,6 +96,133 @@ const findBestName = (fileName, resumeText, notesText) => {
   return "";
 };
 
+const QUESTION_LINE = /(^|\s)(q|question|ask|asked|prompt)\s*[:\-]|[?]/i;
+
+const normalizeSentence = (value) =>
+  cleanValue(value)
+    .replace(/[?]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const stripQuestionLabel = (value) =>
+  value
+    .replace(/^\s*(q|question)\s*[:\-]\s*/i, "")
+    .replace(/^\s*(a|answer)\s*[:\-]\s*/i, "");
+
+const getCleanFactLines = (text) =>
+  (text || "")
+    .split(/\r?\n/)
+    .map((line) => normalizeSentence(stripQuestionLabel(line)))
+    .filter(
+      (line) =>
+        line.length > 2 &&
+        !QUESTION_LINE.test(line) &&
+        !EMAIL_OR_PHONE.test(line),
+    );
+
+const dedupeLines = (lines) => {
+  const seen = new Set();
+  return lines.filter((line) => {
+    const key = line.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const firstMatch = (lines, pattern) => lines.find((line) => pattern.test(line)) || "";
+
+const buildDetailedOverview = (notes, resume, extracted) => {
+  const lines = dedupeLines(getCleanFactLines(`${notes}\n${resume}`));
+  const experienceFact =
+    extracted.yearsExp || firstMatch(lines, /\b(year|yrs|experience|tenure)\b/i);
+  const roleFact =
+    extracted.unitInterest ||
+    firstMatch(
+      lines,
+      /\b(icu|nicu|picu|er|ed|or|telemetry|med[\s-]?surg|step[\s-]?down|labor|delivery|rn)\b/i,
+    );
+  const employerFact =
+    extracted.currentEmp || firstMatch(lines, /\b(hospital|medical|clinic|health|employer|facility)\b/i);
+  const scheduleFact = firstMatch(
+    lines,
+    /\b(day shift|night shift|weekend|availability|start date|notice|full[- ]?time|part[- ]?time)\b/i,
+  );
+  const credentialFact = firstMatch(
+    lines,
+    /\b(bsn|adn|acls|bls|pals|tncc|certified|license|licensed)\b/i,
+  );
+
+  const highlightPool = lines
+    .filter((line) => line.length >= 18)
+    .filter((line) => !/^\s*(overview|summary|notes?)\s*[:\-]/i.test(line))
+    .slice(0, 5);
+
+  const sections = [];
+  if (experienceFact || roleFact || employerFact) {
+    sections.push(
+      `Candidate profile: ${[
+        experienceFact && `RN experience ${normalizeSentence(experienceFact)}`,
+        roleFact && `target role/unit ${normalizeSentence(roleFact)}`,
+        employerFact && `recent employer or practice setting ${normalizeSentence(employerFact)}`,
+      ]
+        .filter(Boolean)
+        .join("; ")}.`,
+    );
+  }
+  if (scheduleFact || credentialFact) {
+    sections.push(
+      `Readiness highlights: ${[
+        scheduleFact && normalizeSentence(scheduleFact),
+        credentialFact && normalizeSentence(credentialFact),
+      ]
+        .filter(Boolean)
+        .join("; ")}.`,
+    );
+  }
+  if (highlightPool.length > 0) {
+    sections.push(`Additional highlights: ${highlightPool.map(normalizeSentence).join("; ")}.`);
+  }
+
+  return cleanValue(sections.join(" "));
+};
+
+const buildDetailedHotButtons = (notes, resume, extractedHotButtons) => {
+  const lines = dedupeLines(getCleanFactLines(`${notes}\n${resume}`));
+  const explicit = normalizeSentence(extractedHotButtons);
+  const preferenceLines = lines.filter((line) =>
+    /\b(non[- ]?negotiable|dealbreaker|deal breaker|must|requires|cannot|can.?t|won.?t|prefers|preference|avoid|needs|only)\b/i.test(
+      line,
+    ),
+  );
+  const availabilityLines = lines.filter((line) =>
+    /\b(shift|schedule|weekend|commute|location|distance|pay|rate|salary|benefits|contract)\b/i.test(
+      line,
+    ),
+  );
+
+  const hotList = dedupeLines(
+    [explicit, ...preferenceLines.slice(0, 4), ...availabilityLines.slice(0, 2)]
+      .map(normalizeSentence)
+      .filter(Boolean),
+  );
+
+  if (hotList.length === 0) {
+    return "No hard dealbreakers captured in the notes. Primary alignment points are compensation, schedule fit, unit match, and location convenience.";
+  }
+
+  return `Priority alignment points: ${hotList.join("; ")}.`;
+};
+
+const sanitizeForSubmission = (value) =>
+  cleanValue(
+    (value || "")
+      .split(/\r?\n/)
+      .map((line) => normalizeSentence(stripQuestionLabel(line)))
+      .filter((line) => line && !QUESTION_LINE.test(line))
+      .join(" "),
+  );
+
 const extractFromText = (rawNotes, resumeText, fileName) => {
   const notes = rawNotes || "";
   const resume = resumeText || "";
@@ -145,7 +272,7 @@ const extractFromText = (rawNotes, resumeText, fileName) => {
     ]) ||
     "";
 
-  const overview =
+  const rawOverview =
     findByLabel(combined, [
       "sourcing overview",
       "overview",
@@ -153,16 +280,22 @@ const extractFromText = (rawNotes, resumeText, fileName) => {
       "summary",
       "notes",
     ]) ||
-    cleanValue(notes);
+    notes;
 
-  return {
+  const rawExtracted = {
     candidateName: findBestName(fileName, resume, notes),
     sourceType: inferSourceType(combined),
     unitInterest: cleanValue(unitInterest),
     yearsExp: cleanValue(yearsFromLabel || yearsFromPattern || ""),
     currentEmp: cleanValue(currentEmp),
     hotButtons: cleanValue(hotButtons),
-    overview: cleanValue(overview),
+    overview: cleanValue(rawOverview),
+  };
+
+  return {
+    ...rawExtracted,
+    hotButtons: buildDetailedHotButtons(notes, resume, rawExtracted.hotButtons),
+    overview: buildDetailedOverview(notes, resume, rawExtracted),
   };
 };
 
@@ -176,7 +309,7 @@ const mergeFormData = (form, extracted) => ({
 });
 
 const normalizeBlock = (value) => {
-  const cleaned = cleanValue(value);
+  const cleaned = sanitizeForSubmission(value);
   return cleaned || "N/A";
 };
 
