@@ -132,59 +132,105 @@ const dedupeLines = (lines) => {
 
 const firstMatch = (lines, pattern) => lines.find((line) => pattern.test(line)) || "";
 
+const firstSnippet = (lines, patterns) => {
+  for (const pattern of patterns) {
+    const hit = firstMatch(lines, pattern);
+    if (hit) return hit;
+  }
+  return "";
+};
+
+const formatSentence = (value) => {
+  const sentence = normalizeSentence(value);
+  if (!sentence) return "";
+  return /[.!]$/.test(sentence) ? sentence : `${sentence}.`;
+};
+
 const buildDetailedOverview = (notes, resume, extracted) => {
   const lines = dedupeLines(getCleanFactLines(`${notes}\n${resume}`));
-  const experienceFact =
-    extracted.yearsExp || firstMatch(lines, /\b(year|yrs|experience|tenure)\b/i);
-  const roleFact =
+  const candidate = extracted.candidateName || "The candidate";
+  const yearsExp =
+    extracted.yearsExp || firstSnippet(lines, [/\b\d{1,2}\+?\s*(years?|yrs?)\b/i]);
+  const specialties =
     extracted.unitInterest ||
-    firstMatch(
-      lines,
-      /\b(icu|nicu|picu|er|ed|or|telemetry|med[\s-]?surg|step[\s-]?down|labor|delivery|rn)\b/i,
-    );
-  const employerFact =
-    extracted.currentEmp || firstMatch(lines, /\b(hospital|medical|clinic|health|employer|facility)\b/i);
-  const scheduleFact = firstMatch(
-    lines,
-    /\b(day shift|night shift|weekend|availability|start date|notice|full[- ]?time|part[- ]?time)\b/i,
-  );
-  const credentialFact = firstMatch(
-    lines,
-    /\b(bsn|adn|acls|bls|pals|tncc|certified|license|licensed)\b/i,
-  );
+    firstSnippet(lines, [
+      /\b(med[\s-]?surg|pcu|icu|nicu|picu|er|ed|or|telemetry|step[\s-]?down|labor|delivery|home health)\b/i,
+    ]);
+  const currentRole = firstSnippet(lines, [
+    /\b(currently|presently|serving|working).{0,80}\b(travel|nurse|rn|hospital|facility)\b/i,
+  ]);
+  const transitionGoal = firstSnippet(lines, [
+    /\b(transition|permanent|stable|consisten|long[- ]?term|full[- ]?time)\b/i,
+  ]);
+  const compensation = firstSnippet(lines, [
+    /\$\s?\d{2,3}(?:\s*(?:\/hr|\/hour|per hour))?/i,
+    /\b(minimum compensation|pay|rate|salary)\b/i,
+  ]);
+  const reliability = firstSnippet(lines, [
+    /\b(reliable|dependable|attendance|overtime|high standards|passion)\b/i,
+  ]);
+  const credentials = firstSnippet(lines, [
+    /\b(BSN|ADN|MSN|ACLS|BLS|PALS|TNCC|license|licensed|credential)\b/i,
+  ]);
+  const legalStatus = firstSnippet(lines, [
+    /\b(TN visa|green card|sponsorship|work authorization|citizen|permanent resident)\b/i,
+  ]);
+  const relocation = firstSnippet(lines, [
+    /\b(relocat|full[- ]?time|day shift|night shift|not interviewing|competitor)\b/i,
+  ]);
+  const adminNextStep = firstSnippet(lines, [
+    /\b(CGFNS|CES|credential|verification|report|administrative next step|pending)\b/i,
+  ]);
 
-  const highlightPool = lines
-    .filter((line) => line.length >= 18)
-    .filter((line) => !/^\s*(overview|summary|notes?)\s*[:\-]/i.test(line))
-    .slice(0, 5);
+  const paragraphs = [];
 
-  const sections = [];
-  if (experienceFact || roleFact || employerFact) {
-    sections.push(
-      `Candidate profile: ${[
-        experienceFact && `RN experience ${normalizeSentence(experienceFact)}`,
-        roleFact && `target role/unit ${normalizeSentence(roleFact)}`,
-        employerFact && `recent employer or practice setting ${normalizeSentence(employerFact)}`,
-      ]
-        .filter(Boolean)
-        .join("; ")}.`,
-    );
-  }
-  if (scheduleFact || credentialFact) {
-    sections.push(
-      `Readiness highlights: ${[
-        scheduleFact && normalizeSentence(scheduleFact),
-        credentialFact && normalizeSentence(credentialFact),
-      ]
-        .filter(Boolean)
-        .join("; ")}.`,
+  const yearsDescriptor = yearsExp ? normalizeSentence(yearsExp) : "";
+  const profileParts = [specialties && `specialized focus on ${normalizeSentence(specialties)}`].filter(Boolean);
+  if (yearsDescriptor || profileParts.length > 0) {
+    paragraphs.push(
+      `${candidate} is a veteran nursing professional ${
+        yearsDescriptor ? `with ${yearsDescriptor} in clinical practice` : ""
+      }${profileParts.length > 0 ? `${yearsDescriptor ? ", including " : "with "}${profileParts.join(", ")}` : ""}.`,
     );
   }
-  if (highlightPool.length > 0) {
-    sections.push(`Additional highlights: ${highlightPool.map(normalizeSentence).join("; ")}.`);
+
+  const objectiveParts = [
+    currentRole && normalizeSentence(currentRole),
+    transitionGoal && normalizeSentence(transitionGoal),
+    compensation && `compensation target: ${normalizeSentence(compensation)}`,
+  ].filter(Boolean);
+  if (objectiveParts.length > 0) {
+    paragraphs.push(`Current placement and goals: ${objectiveParts.join("; ")}.`);
   }
 
-  return cleanValue(sections.join(" "));
+  const qualityParts = [reliability && normalizeSentence(reliability)].filter(Boolean);
+  if (qualityParts.length > 0) {
+    paragraphs.push(`Professional strengths: ${qualityParts.join("; ")}.`);
+  }
+
+  const complianceParts = [
+    credentials && normalizeSentence(credentials),
+    legalStatus && normalizeSentence(legalStatus),
+  ].filter(Boolean);
+  if (complianceParts.length > 0) {
+    paragraphs.push(`Credentialing and work authorization: ${complianceParts.join("; ")}.`);
+  }
+
+  const readinessParts = [
+    relocation && normalizeSentence(relocation),
+    adminNextStep && `next step: ${normalizeSentence(adminNextStep)}`,
+  ].filter(Boolean);
+  if (readinessParts.length > 0) {
+    paragraphs.push(`Readiness and next actions: ${readinessParts.join("; ")}.`);
+  }
+
+  if (paragraphs.length === 0) {
+    const fallback = dedupeLines(lines.filter((line) => line.length > 15)).slice(0, 5);
+    if (fallback.length === 0) return "";
+    return `Candidate summary: ${fallback.map(formatSentence).join(" ")}`;
+  }
+
+  return cleanValue(paragraphs.map(formatSentence).join(" "));
 };
 
 const buildDetailedHotButtons = (notes, resume, extractedHotButtons) => {
@@ -211,7 +257,7 @@ const buildDetailedHotButtons = (notes, resume, extractedHotButtons) => {
     return "No hard dealbreakers captured in the notes. Primary alignment points are compensation, schedule fit, unit match, and location convenience.";
   }
 
-  return `Priority alignment points: ${hotList.join("; ")}.`;
+  return `Priority alignment points: ${hotList.map(formatSentence).join(" ")}`;
 };
 
 const sanitizeForSubmission = (value) =>
