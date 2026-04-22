@@ -146,6 +146,16 @@ const formatSentence = (value) => {
   return /[.!]$/.test(sentence) ? sentence : `${sentence}.`;
 };
 
+const asClause = (value, prefix = "") => {
+  const text = normalizeSentence(value);
+  if (!text) return "";
+  return prefix ? `${prefix}${text}` : text;
+};
+
+const startsWithWord = (value, word) => new RegExp(`^${word}\\b`, "i").test(value || "");
+
+const joinClauses = (clauses) => clauses.filter(Boolean).join("; ");
+
 const buildDetailedOverview = (notes, resume, extracted) => {
   const lines = dedupeLines(getCleanFactLines(`${notes}\n${resume}`));
   const candidate = extracted.candidateName || "The candidate";
@@ -182,55 +192,40 @@ const buildDetailedOverview = (notes, resume, extracted) => {
     /\b(CGFNS|CES|credential|verification|report|administrative next step|pending)\b/i,
   ]);
 
-  const paragraphs = [];
+  const paragraphOne = joinClauses([
+    yearsExp && `${candidate} is a veteran nursing professional with ${normalizeSentence(yearsExp)} in clinical experience`,
+    specialties && asClause(specialties, "specialized focus on "),
+    currentRole &&
+      (startsWithWord(currentRole, "currently")
+        ? normalizeSentence(currentRole)
+        : asClause(currentRole, "currently ")),
+  ]);
 
-  const yearsDescriptor = yearsExp ? normalizeSentence(yearsExp) : "";
-  const profileParts = [specialties && `specialized focus on ${normalizeSentence(specialties)}`].filter(Boolean);
-  if (yearsDescriptor || profileParts.length > 0) {
-    paragraphs.push(
-      `${candidate} is a veteran nursing professional ${
-        yearsDescriptor ? `with ${yearsDescriptor} in clinical practice` : ""
-      }${profileParts.length > 0 ? `${yearsDescriptor ? ", including " : "with "}${profileParts.join(", ")}` : ""}.`,
-    );
-  }
+  const paragraphTwo = joinClauses([
+    transitionGoal && asClause(transitionGoal, "she is seeking "),
+    compensation && asClause(compensation, "target compensation: "),
+    reliability && asClause(reliability, "professional strengths: "),
+  ]);
 
-  const objectiveParts = [
-    currentRole && normalizeSentence(currentRole),
-    transitionGoal && normalizeSentence(transitionGoal),
-    compensation && `compensation target: ${normalizeSentence(compensation)}`,
-  ].filter(Boolean);
-  if (objectiveParts.length > 0) {
-    paragraphs.push(`Current placement and goals: ${objectiveParts.join("; ")}.`);
-  }
+  const paragraphThree = joinClauses([
+    credentials && asClause(credentials, "credentials: "),
+    legalStatus && asClause(legalStatus, "work authorization: "),
+    relocation && asClause(relocation, "readiness: "),
+    adminNextStep && asClause(adminNextStep, "next administrative step: "),
+  ]);
 
-  const qualityParts = [reliability && normalizeSentence(reliability)].filter(Boolean);
-  if (qualityParts.length > 0) {
-    paragraphs.push(`Professional strengths: ${qualityParts.join("; ")}.`);
-  }
+  const narrative = [paragraphOne, paragraphTwo, paragraphThree]
+    .filter(Boolean)
+    .map(formatSentence)
+    .join(" ");
 
-  const complianceParts = [
-    credentials && normalizeSentence(credentials),
-    legalStatus && normalizeSentence(legalStatus),
-  ].filter(Boolean);
-  if (complianceParts.length > 0) {
-    paragraphs.push(`Credentialing and work authorization: ${complianceParts.join("; ")}.`);
-  }
-
-  const readinessParts = [
-    relocation && normalizeSentence(relocation),
-    adminNextStep && `next step: ${normalizeSentence(adminNextStep)}`,
-  ].filter(Boolean);
-  if (readinessParts.length > 0) {
-    paragraphs.push(`Readiness and next actions: ${readinessParts.join("; ")}.`);
-  }
-
-  if (paragraphs.length === 0) {
+  if (!narrative) {
     const fallback = dedupeLines(lines.filter((line) => line.length > 15)).slice(0, 5);
     if (fallback.length === 0) return "";
     return `Candidate summary: ${fallback.map(formatSentence).join(" ")}`;
   }
 
-  return cleanValue(paragraphs.map(formatSentence).join(" "));
+  return cleanValue(narrative);
 };
 
 const buildDetailedHotButtons = (notes, resume, extractedHotButtons) => {
@@ -257,7 +252,12 @@ const buildDetailedHotButtons = (notes, resume, extractedHotButtons) => {
     return "No hard dealbreakers captured in the notes. Primary alignment points are compensation, schedule fit, unit match, and location convenience.";
   }
 
-  return `Priority alignment points: ${hotList.map(formatSentence).join(" ")}`;
+  const top = hotList.slice(0, 5);
+  return cleanValue(
+    `Priority alignment points: ${top
+      .map((item, idx) => `${idx + 1}) ${normalizeSentence(item)}`)
+      .join(" ")}.`,
+  );
 };
 
 const sanitizeForSubmission = (value) =>
